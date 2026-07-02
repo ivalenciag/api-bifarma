@@ -1234,7 +1234,9 @@ def build_pdf_bytes(title: str, columns: List[str], rows: List[Dict[str, Any]]) 
 
 
 class BifarmaClient:
-    def __init__(self) -> None:
+    def __init__(self, username: str, password: str) -> None:
+        self.username = username
+        self.password = password
         self.lock = threading.RLock()
         self.session = requests.Session()
         self.last_login_at = 0.0
@@ -1258,10 +1260,10 @@ class BifarmaClient:
             if not force and self.last_login_at and now_timestamp() - self.last_login_at < SESSION_TTL_SECONDS:
                 return {"logged_in": True, "reused_session": True}
 
-            username = os.getenv("BIFARMA_USER")
-            password = os.getenv("BIFARMA_PASSWORD")
+            username = self.username
+            password = self.password
             if not username or not password:
-                raise BifarmaError("BIFARMA_USER y BIFARMA_PASSWORD deben estar configuradas en el servidor.")
+                raise BifarmaError("Las credenciales de Bifarma son obligatorias.")
 
             self.session = self._new_session()
             login_page = self.session.get(LOGIN_URL, timeout=REQUEST_TIMEOUT, allow_redirects=True)
@@ -1663,10 +1665,10 @@ class BifarmaClient:
             )
 
     def _browser_login(self, page: Any) -> None:
-        username = os.getenv("BIFARMA_USER")
-        password = os.getenv("BIFARMA_PASSWORD")
+        username = self.username
+        password = self.password
         if not username or not password:
-            raise BifarmaError("BIFARMA_USER y BIFARMA_PASSWORD deben estar configuradas en el servidor.")
+            raise BifarmaError("Las credenciales de Bifarma son obligatorias.")
 
         page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
 
@@ -2296,11 +2298,13 @@ class BifarmaClient:
             }
 
 
-_client = BifarmaClient()
-
-
-def get_client() -> BifarmaClient:
-    return _client
+def get_client(
+    x_bifarma_user: Optional[str] = Header(default=None, alias="x-bifarma-user"),
+    x_bifarma_password: Optional[str] = Header(default=None, alias="x-bifarma-password"),
+) -> BifarmaClient:
+    if not x_bifarma_user or not x_bifarma_password:
+        raise HTTPException(status_code=401, detail="Headers x-bifarma-user y x-bifarma-password son obligatorios.")
+    return BifarmaClient(x_bifarma_user, x_bifarma_password)
 
 
 def handle_bifarma_error(exc: Exception) -> JSONResponse:
@@ -2427,9 +2431,7 @@ def status() -> Dict[str, Any]:
         "version": APP_VERSION,
         "base_url": BASE_URL,
         "api_key_configured": bool(os.getenv("API_KEY")),
-        "bifarma_user_configured": bool(os.getenv("BIFARMA_USER")),
-        "bifarma_password_configured": bool(os.getenv("BIFARMA_PASSWORD")),
-        "session_cached": bool(_client.last_login_at and now_timestamp() - _client.last_login_at < SESSION_TTL_SECONDS),
+        "stateless": True,
         "playwright": playwright_import_status(),
     }
 
