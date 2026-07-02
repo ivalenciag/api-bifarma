@@ -1,0 +1,12 @@
+# Secretos - NUNCA en un repo publico
+.env
+
+# Entorno virtual
+.venv/
+venv/
+
+# Cache de Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
