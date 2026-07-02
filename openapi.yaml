@@ -1,0 +1,366 @@
+openapi: 3.1.0
+info:
+  title: Bifarma Connector API
+  description: API protegida con X-API-Key para iniciar sesión en Bifarma, listar informes, extraer datos y exportarlos en CSV, XLSX o PDF.
+  version: 2.7.0
+servers:
+  - url: https://bifarma-api.onrender.com
+    description: Servidor público en Render
+paths:
+  /status:
+    get:
+      operationId: getStatus
+      summary: Comprueba el estado de la API.
+      security:
+        - apiKeyAuth: []
+      responses:
+        "200":
+          description: Estado actual.
+  /browser-status:
+    get:
+      operationId: getBrowserStatus
+      summary: Comprueba si Playwright y Chromium están instalados para la exportación por navegador.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: auto_install
+          in: query
+          required: false
+          description: Si es true, intenta instalar Chromium si falta.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Estado del navegador automatizado.
+  /reports-menu:
+    get:
+      operationId: getBifarmaReportsMenu
+      summary: Obtiene el menú de informes disponibles en Bifarma.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: refresh
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Menú de informes obtenido correctamente.
+  /report-data/{code}:
+    get:
+      operationId: getBifarmaReportData
+      summary: Extrae datos estructurados de un informe de Bifarma.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+            example: UN.080.NEW01
+        - name: max_rows
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+        - name: all_pages
+          in: query
+          required: false
+          description: Si es true, intenta recorrer todas las páginas del informe paginado.
+          schema:
+            type: boolean
+            default: false
+        - name: max_pages
+          in: query
+          required: false
+          description: Límite máximo de páginas a recorrer cuando all_pages=true.
+          schema:
+            type: integer
+            default: 100
+        - name: start_date
+          in: query
+          required: false
+          description: Fecha inicial. Acepta YYYY-MM-DD o DD/MM/YYYY.
+          schema:
+            type: string
+            example: "2026-05-01"
+        - name: end_date
+          in: query
+          required: false
+          description: Fecha final. Acepta YYYY-MM-DD o DD/MM/YYYY.
+          schema:
+            type: string
+            example: "2026-05-21"
+        - name: filters
+          in: query
+          required: false
+          description: JSON opcional con filtros explícitos por nombre de campo del formulario.
+          schema:
+            type: string
+            example: '{"ctl00$ContentPlaceHolder1$txtFechaDesde":"01/05/2026"}'
+      responses:
+        "200":
+          description: Datos extraídos del informe.
+  /report-export/{code}:
+    get:
+      operationId: exportBifarmaReport
+      summary: Exporta un informe de Bifarma.
+      description: Abre el informe y devuelve un archivo CSV, XLSX o PDF. Por defecto intenta descargar primero la exportacion nativa de Bifarma; si no existe boton HTML, puede usar navegador automatizado para el menu contextual.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+            example: UN.080.NEW01
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - csv
+              - xlsx
+              - pdf
+            default: xlsx
+        - name: mode
+          in: query
+          required: false
+          description: auto intenta primero la exportacion nativa de Bifarma, despues navegador con menu contextual y finalmente HTML como respaldo; native_export intenta Excel/CSV nativo y, si no hay boton HTML, cae a browser_export; browser_export usa navegador y clic derecho; html usa la extraccion anterior. Para UN.077 usa browser_export o auto.
+          schema:
+            type: string
+            enum:
+              - auto
+              - native_export
+              - browser_export
+              - html
+            default: auto
+        - name: max_rows
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 500
+        - name: all_pages
+          in: query
+          required: false
+          description: Si es true, intenta recorrer todas las páginas del informe paginado.
+          schema:
+            type: boolean
+            default: false
+        - name: max_pages
+          in: query
+          required: false
+          description: Límite máximo de páginas a recorrer cuando all_pages=true.
+          schema:
+            type: integer
+            default: 100
+        - name: start_date
+          in: query
+          required: false
+          description: Fecha inicial. Acepta YYYY-MM-DD o DD/MM/YYYY.
+          schema:
+            type: string
+            example: "2026-05-01"
+        - name: end_date
+          in: query
+          required: false
+          description: Fecha final. Acepta YYYY-MM-DD o DD/MM/YYYY.
+          schema:
+            type: string
+            example: "2026-05-21"
+        - name: filters
+          in: query
+          required: false
+          description: JSON opcional con filtros explícitos por nombre de campo del formulario.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Archivo exportado correctamente.
+  /report-export-link/{code}:
+    get:
+      operationId: createBifarmaReportDownloadLink
+      summary: Genera un archivo exportado y devuelve un enlace temporal de descarga.
+      description: Recomendado para acciones GPT e informes grandes. Genera el Excel, CSV o PDF en el servidor y devuelve JSON con download_url en vez de enviar el binario directamente.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+            example: UN.077
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - csv
+              - xlsx
+              - pdf
+            default: xlsx
+        - name: mode
+          in: query
+          required: false
+          description: Para UN.077 usa browser_export o auto.
+          schema:
+            type: string
+            enum:
+              - auto
+              - native_export
+              - browser_export
+              - html
+            default: auto
+        - name: max_rows
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 500
+        - name: all_pages
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - name: max_pages
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+        - name: start_date
+          in: query
+          required: false
+          description: Fecha inicial. Acepta YYYY-MM-DD o DD/MM/YYYY.
+          schema:
+            type: string
+            example: "2025-06-23"
+        - name: end_date
+          in: query
+          required: false
+          description: Fecha final. Acepta YYYY-MM-DD o DD/MM/YYYY.
+          schema:
+            type: string
+            example: "2026-06-23"
+        - name: filters
+          in: query
+          required: false
+          description: JSON opcional con filtros explicitos por nombre de campo del formulario.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: JSON con download_url temporal para descargar el archivo.
+  /report-open/{code}:
+    get:
+      operationId: openBifarmaReport
+      summary: Abre un informe concreto de Bifarma.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+            example: UN.080.NEW01
+        - name: start_date
+          in: query
+          required: false
+          schema:
+            type: string
+            example: "2026-05-01"
+        - name: end_date
+          in: query
+          required: false
+          schema:
+            type: string
+            example: "2026-05-21"
+        - name: filters
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Resultado de apertura del informe.
+  /browser-export-debug/{code}:
+    get:
+      operationId: debugBifarmaBrowserExport
+      summary: Diagnostica la exportacion por navegador y menu contextual.
+      description: Abre el informe con navegador headless, hace clic derecho sobre la parrilla e informa que opciones de exportacion ve sin descargar el archivo.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+            example: UN.077
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - xlsx
+              - csv
+            default: xlsx
+        - name: start_date
+          in: query
+          required: false
+          description: Fecha inicial. Acepta YYYY-MM-DD o DD/MM/YYYY.
+          schema:
+            type: string
+            example: "2025-06-23"
+        - name: end_date
+          in: query
+          required: false
+          description: Fecha final. Acepta YYYY-MM-DD o DD/MM/YYYY.
+          schema:
+            type: string
+            example: "2026-06-23"
+        - name: filters
+          in: query
+          required: false
+          description: JSON opcional con filtros explicitos por nombre de campo del formulario.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Diagnostico del menu contextual y opciones visibles.
+  /report-debug/{code}:
+    get:
+      operationId: debugBifarmaReport
+      summary: Devuelve los datos internos detectados para un informe.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+            example: UN.080.NEW01
+      responses:
+        "200":
+          description: Datos internos del informe.
+components:
+  schemas: {}
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
