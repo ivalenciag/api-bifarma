@@ -3,5 +3,5 @@ services:
     name: bifarma-api
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: bash render-build.sh
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
