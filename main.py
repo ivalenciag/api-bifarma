@@ -194,6 +194,11 @@ def format_bifarma_date(value: Optional[str]) -> Optional[str]:
     return value
 
 
+def is_yyyymm(value: Optional[str]) -> bool:
+    """True si el valor es un mes en formato YYYYMM (ej. 202606)."""
+    return bool(value and re.fullmatch(r"20\d{4}", value.strip()))
+
+
 def looks_like_login_page(html: str) -> bool:
     html_lower = html.lower()
     return "loginform.aspx" in html_lower or 'type="password"' in html_lower or "type='password'" in html_lower
@@ -552,9 +557,15 @@ def build_requested_filters(
     )
 
     if start_value:
-        requested["__date_from__"] = format_bifarma_date(start_value) or start_value
+        if is_yyyymm(start_value):
+            requested["__month_from__"] = start_value.strip()
+        else:
+            requested["__date_from__"] = format_bifarma_date(start_value) or start_value
     if end_value:
-        requested["__date_to__"] = format_bifarma_date(end_value) or end_value
+        if is_yyyymm(end_value):
+            requested["__month_to__"] = end_value.strip()
+        else:
+            requested["__date_to__"] = format_bifarma_date(end_value) or end_value
 
     for key, value in request.query_params.multi_items():
         if key not in reserved and key not in requested and clean_text(value):
@@ -1499,7 +1510,7 @@ class BifarmaClient:
                 filter_status["not_applied"]["date_to"] = date_to
 
         for key, value in requested_filters.items():
-            if key in {"__date_from__", "__date_to__"}:
+            if key in {"__date_from__", "__date_to__", "__month_from__", "__month_to__"}:
                 continue
 
             if key in payload:
@@ -1799,6 +1810,66 @@ class BifarmaClient:
             {"hints": hints, "value": value},
         )
 
+    # JS: descubre globales DevExpress con items YYYYMM (combos Ano-Mes).
+    _DISCOVER_YYYYMM_COMBOS_JS = r"""
+    () => {
+      var out = [];
+      for (var k in window) {
+        var v = window[k];
+        if (!v || typeof v !== 'object') continue;
+        if (typeof v.SetValue !== 'function' || typeof v.GetText !== 'function') continue;
+        if (typeof v.GetItemCount !== 'function' || v.GetItemCount() < 2) continue;
+        var sample = [];
+        for (var i = 0; i < Math.min(v.GetItemCount(), 3); i++) {
+          try { sample.push(String(v.GetItem(i).value)); } catch (e) {}
+        }
+        if (!sample.every(function(s) { return /^20\d{4}$/.test(s); })) continue;
+        var el = (typeof v.GetMainElement === 'function') ? v.GetMainElement() : null;
+        out.push({
+          key: k,
+          mainId: el ? el.id : null,
+          nItems: v.GetItemCount(),
+          value: String(v.GetValue()),
+          text: v.GetText()
+        });
+      }
+      return out;
+    }
+    """
+
+    # JS: lista todos los items de una combo YYYYMM.
+    _LIST_YYYYMM_ITEMS_JS = r"""
+    (key) => {
+      var c = window[key];
+      if (!c) return [];
+      var items = [];
+      for (var i = 0; i < c.GetItemCount(); i++) {
+        var it = c.GetItem(i);
+        items.push({ v: String(it.value), t: it.text });
+      }
+      return items;
+    }
+    """
+
+    def _browser_select_yyyymm_combo(self, page: Any, key: str, main_id: str, value: str, text: str) -> bool:
+        """Abre la combo DevExpress con ShowDropDown() y hace clic real en el item."""
+        try:
+            page.evaluate(f"() => window['{key}'].ShowDropDown()")
+            page.wait_for_timeout(500)
+            listbox = f"#{main_id}_DDD_L"
+            try:
+                page.wait_for_selector(listbox, state="visible", timeout=5000)
+            except Exception:
+                return False
+            item = page.locator(f"{listbox} td.dxeListBoxItem_Glass").filter(
+                has_text=re.compile(rf"^{re.escape(text)}$")
+            )
+            item.first.click(timeout=8000)
+            page.wait_for_timeout(1200)
+            return True
+        except Exception:
+            return False
+
     def _browser_apply_filters(self, page: Any, requested_filters: Optional[Dict[str, str]]) -> Dict[str, Any]:
         status = {
             "requested": requested_filters or {},
@@ -1807,6 +1878,43 @@ class BifarmaClient:
         }
         if not requested_filters:
             return status
+
+        month_from = requested_filters.get("__month_from__")
+        month_to = requested_filters.get("__month_to__")
+
+        if month_from or month_to:
+            combos = page.evaluate(self._DISCOVER_YYYYMM_COMBOS_JS)
+            if len(combos) >= 2:
+                def _suffix(key: str) -> int:
+                    nums = re.findall(r"\d+", key)
+                    return int(nums[-1]) if nums else 0
+                combos.sort(key=lambda c: _suffix(c["key"]))
+                desde_combo, hasta_combo = combos[0], combos[1]
+
+                if month_from:
+                    items = page.evaluate(self._LIST_YYYYMM_ITEMS_JS, desde_combo["key"])
+                    match = next((it for it in items if it["v"] == month_from), None)
+                    if match and self._browser_select_yyyymm_combo(
+                        page, desde_combo["key"], desde_combo["mainId"], match["v"], match["t"]
+                    ):
+                        status["applied"]["month_from"] = {"field": desde_combo["key"], "value": month_from, "text": match["t"]}
+                    else:
+                        status["not_applied"]["month_from"] = month_from
+
+                if month_to:
+                    items = page.evaluate(self._LIST_YYYYMM_ITEMS_JS, hasta_combo["key"])
+                    match = next((it for it in items if it["v"] == month_to), None)
+                    if match and self._browser_select_yyyymm_combo(
+                        page, hasta_combo["key"], hasta_combo["mainId"], match["v"], match["t"]
+                    ):
+                        status["applied"]["month_to"] = {"field": hasta_combo["key"], "value": month_to, "text": match["t"]}
+                    else:
+                        status["not_applied"]["month_to"] = month_to
+            else:
+                if month_from:
+                    status["not_applied"]["month_from"] = month_from
+                if month_to:
+                    status["not_applied"]["month_to"] = month_to
 
         date_from = requested_filters.get("__date_from__")
         date_to = requested_filters.get("__date_to__")
@@ -1834,7 +1942,7 @@ class BifarmaClient:
                 status["not_applied"]["date_to"] = date_to
 
         for key, value in requested_filters.items():
-            if key in {"__date_from__", "__date_to__"}:
+            if key in {"__date_from__", "__date_to__", "__month_from__", "__month_to__"}:
                 continue
             field = self._browser_fill_filter(page, [key], value)
             if field:
