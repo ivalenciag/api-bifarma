@@ -199,6 +199,21 @@ def is_yyyymm(value: Optional[str]) -> bool:
     return bool(value and re.fullmatch(r"20\d{4}", value.strip()))
 
 
+def parse_ddmmyyyy(value: Optional[str]) -> Optional[Tuple[int, int, int]]:
+    """dd/mm/aaaa -> (anio, mes, dia). Devuelve None si no encaja."""
+    if not value:
+        return None
+    m = re.fullmatch(r"\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*", value)
+    if not m:
+        return None
+    day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    try:
+        datetime(year, month, day)
+    except ValueError:
+        return None
+    return year, month, day
+
+
 def looks_like_login_page(html: str) -> bool:
     html_lower = html.lower()
     return "loginform.aspx" in html_lower or 'type="password"' in html_lower or "type='password'" in html_lower
@@ -1870,6 +1885,45 @@ class BifarmaClient:
         except Exception:
             return False
 
+    # JS: descubre date-edit DevExpress vivos (tienen SetDate/GetDate). UN.080
+    # usa dos ASPxDateEdit (_biCt4=Desde, _biCt5=Hasta), no las combos de UN.088.
+    _DISCOVER_DATEEDITS_JS = r"""
+    () => {
+      var out = [];
+      for (var k in window) {
+        var v;
+        try { v = window[k]; } catch (e) { continue; }
+        if (!v || typeof v !== 'object') continue;
+        if (typeof v.SetDate !== 'function' || typeof v.GetDate !== 'function') continue;
+        var el = (typeof v.GetMainElement === 'function') ? v.GetMainElement() : null;
+        out.push({ key: k, mainId: el ? el.id : null });
+      }
+      return out;
+    }
+    """
+
+    # JS: fija la fecha de un date-edit por su key global. SetDate commitea el
+    # input visible (verificado en spike): el postback lo serializa correcto.
+    _SET_DATEEDIT_JS = r"""
+    ({ key, y, m, d }) => {
+      var c = window[key];
+      if (!c || typeof c.SetDate !== 'function') return false;
+      try { c.SetDate(new Date(y, m - 1, d)); return true; } catch (e) { return false; }
+    }
+    """
+
+    @staticmethod
+    def _control_suffix(key: str) -> int:
+        nums = re.findall(r"\d+", key)
+        return int(nums[-1]) if nums else 0
+
+    def _browser_set_dateedit(self, page: Any, key: str, value_ddmmyyyy: str) -> bool:
+        parsed = parse_ddmmyyyy(value_ddmmyyyy)
+        if not parsed:
+            return False
+        year, month, day = parsed
+        return bool(page.evaluate(self._SET_DATEEDIT_JS, {"key": key, "y": year, "m": month, "d": day}))
+
     def _browser_apply_filters(self, page: Any, requested_filters: Optional[Dict[str, str]]) -> Dict[str, Any]:
         status = {
             "requested": requested_filters or {},
@@ -1919,27 +1973,46 @@ class BifarmaClient:
         date_from = requested_filters.get("__date_from__")
         date_to = requested_filters.get("__date_to__")
 
-        if date_from:
-            field = self._browser_fill_filter(
-                page,
-                ["fecha desde", "desde", "inicio", "inicial", "date from", "start", "fecini"],
-                date_from,
-            )
-            if field:
-                status["applied"]["date_from"] = {"field": field, "value": date_from}
-            else:
-                status["not_applied"]["date_from"] = date_from
+        if date_from or date_to:
+            # Ruta DevExpress (UN.080): dos ASPxDateEdit; el primero por sufijo de
+            # control es Desde y el segundo Hasta. SetValue seria silencioso, como
+            # en las combos de UN.088; SetDate si commitea el input del postback.
+            edits = page.evaluate(self._DISCOVER_DATEEDITS_JS)
+            edits.sort(key=lambda e: self._control_suffix(e["key"]))
 
-        if date_to:
-            field = self._browser_fill_filter(
-                page,
-                ["fecha hasta", "hasta", "fin", "final", "date to", "end", "fecfin"],
-                date_to,
-            )
-            if field:
-                status["applied"]["date_to"] = {"field": field, "value": date_to}
+            if edits:
+                if date_from:
+                    if self._browser_set_dateedit(page, edits[0]["key"], date_from):
+                        status["applied"]["date_from"] = {"field": edits[0]["key"], "value": date_from}
+                    else:
+                        status["not_applied"]["date_from"] = date_from
+                if date_to:
+                    if len(edits) >= 2 and self._browser_set_dateedit(page, edits[1]["key"], date_to):
+                        status["applied"]["date_to"] = {"field": edits[1]["key"], "value": date_to}
+                    else:
+                        status["not_applied"]["date_to"] = date_to
             else:
-                status["not_applied"]["date_to"] = date_to
+                # Fallback heuristico para formularios no-DevExpress.
+                if date_from:
+                    field = self._browser_fill_filter(
+                        page,
+                        ["fecha desde", "desde", "inicio", "inicial", "date from", "start", "fecini"],
+                        date_from,
+                    )
+                    if field:
+                        status["applied"]["date_from"] = {"field": field, "value": date_from}
+                    else:
+                        status["not_applied"]["date_from"] = date_from
+                if date_to:
+                    field = self._browser_fill_filter(
+                        page,
+                        ["fecha hasta", "hasta", "fin", "final", "date to", "end", "fecfin"],
+                        date_to,
+                    )
+                    if field:
+                        status["applied"]["date_to"] = {"field": field, "value": date_to}
+                    else:
+                        status["not_applied"]["date_to"] = date_to
 
         for key, value in requested_filters.items():
             if key in {"__date_from__", "__date_to__", "__month_from__", "__month_to__"}:
@@ -1975,6 +2048,40 @@ class BifarmaClient:
                         return
                 except Exception:
                     continue
+
+        # UN.080: el boton "Actualizar datos" es un ASPxButton cuyo <input submit>
+        # esta oculto para Playwright, y dispara un postback de pagina COMPLETA
+        # (no un callback XHR). El clic por texto de arriba no lo alcanza; aqui lo
+        # disparamos via __doPostBack sobre su name y esperamos la navegacion.
+        self._browser_postback_update(page)
+
+    def _browser_postback_update(self, page: Any) -> None:
+        name = page.evaluate(
+            """
+            () => {
+                const inp = document.querySelector(
+                    'input[type=submit][value*="Actualizar"], input[type=submit][value*="Consultar"]'
+                );
+                return inp ? inp.name : null;
+            }
+            """
+        )
+        if not name:
+            return
+        try:
+            with page.expect_navigation(wait_until="load", timeout=45000):
+                # setTimeout: que evaluate retorne antes de que el postback navegue.
+                page.evaluate(
+                    "(n) => { setTimeout(function(){ window.__doPostBack(n, ''); }, 0); }",
+                    name,
+                )
+        except Exception:
+            pass
+        try:
+            page.wait_for_load_state("networkidle", timeout=30000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1500)
 
     def _browser_try_download_from_visible_menu(self, page: Any, format_value: str) -> Optional[Any]:
         if format_value == "csv":
@@ -2530,6 +2637,13 @@ def root() -> Dict[str, Any]:
         "docs": "/docs",
         "status": "/status",
     }
+
+
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    """Endpoint de salud sin autenticacion. Permite detectar si el servicio
+    esta listo tras el cold start de Render free tier sin exponer la API key."""
+    return {"ok": True, "version": APP_VERSION}
 
 
 @app.get("/status", dependencies=[Depends(require_api_key)])

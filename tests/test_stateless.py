@@ -18,6 +18,15 @@ def client():
     return TestClient(main.app)
 
 
+def test_health_no_requiere_api_key(client):
+    # /health debe responder 200 sin ninguna cabecera de autenticacion.
+    r = client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "version" in body
+
+
 def test_no_hay_cliente_global():
     # El singleton compartido entre farmacias debe desaparecer.
     assert not hasattr(main, "_client")
